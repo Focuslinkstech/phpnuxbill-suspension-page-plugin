@@ -1,5 +1,6 @@
 <?php
-/// Allow requests from any origin
+
+// Allow requests from any origin
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
@@ -7,100 +8,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Check if the tbl_payments_page table exists
-$db = ORM::getDb();
-$tableExists = false;
-$tables = $db->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-if (in_array('tbl_payments_page', $tables)) {
-    $tableExists = true;
-}
+register_menu("Payment Page Settings", true, "pay_setup", 'SETTINGS', '', '', "");
 
-
-if (!$tableExists) {
-    // Create the tbl_payments_page table if it doesn't exist
-    if (!in_array('tbl_payments_page', $tables)) {
-        try {
-            $db->exec("
-                CREATE TABLE `tbl_payments_page` (
-                    `id` INT(11) AUTO_INCREMENT PRIMARY KEY,
-                    `username` VARCHAR(255) NOT NULL,
-                    `transaction_id` VARCHAR(1000) NULL,
-                    `transaction_ref` VARCHAR(1000) NOT NULL,
-                    `router_name` VARCHAR(1000) NOT NULL,
-                    `plan_id` INT(11) NOT NULL,
-                    `plan_name` VARCHAR(1000) NOT NULL,
-                    `amount` INT(11) NOT NULL,
-                    `phone_number` VARCHAR(255) NOT NULL,
-                    `transaction_status` VARCHAR(255) NOT NULL,
-                    `gateway_response` TEXT,
-                    `payment_gateway` VARCHAR(255),
-                    `payment_method` VARCHAR(255),
-                    `created_date` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    `payment_date` DATETIME DEFAULT NULL,
-                    `expired_date` DATETIME DEFAULT NULL
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
-            ");
-        } catch (PDOException $e) {
-            // Handle the exception or log the error message
-            echo "Error creating tbl_payments_page table: " . $e->getMessage();
-        }
-    }
-}
-
-register_menu(" Payment Page", true, "pay_overview", 'AFTER_NETWORKS', 'fa fa-paypal', '', "");
-
-
-function pay_overview()
+function pay_setup()
 {
-    global $ui;
-    _admin();
-    $ui->assign('_title', Lang::T("Alternative Payment Page"));
-    $ui->assign('_system_menu', '');
+    global $ui, $admin, $config;
+    $ui->assign('_title', Lang::T("Payment Page Settings"));
+    $ui->assign('_system_menu', 'settings');
     $admin = Admin::_info();
     $ui->assign('_admin', $admin);
 
-    // Check user type for access
-    if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin', 'Sales'])) {
+    if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin'])) {
         _alert(Lang::T('You do not have permission to access this page'), 'danger', "dashboard");
         exit;
     }
 
-    $query = ORM::for_table('tbl_payments_page')->order_by_desc('created_date');
-    $payments = $query->find_many();
-
-    // Get successful payments
-    $successfulPayments = ORM::for_table('tbl_payments_page')
-        ->where('transaction_status', 'paid')
-        ->count();
-
-    // Get failed payments
-    $failedPayments = ORM::for_table('tbl_payments_page')
-        ->where('transaction_status', 'failed')
-        ->count();
-
-    // Get pending payments
-    $pendingPayments = ORM::for_table('tbl_payments_page')
-        ->where('transaction_status', 'pending')
-        ->count();
-
-    // Get cancelled payments
-    $cancelledPayments = ORM::for_table('tbl_payments_page')
-        ->where('transaction_status', 'cancelled')
-        ->count();
-
-    $ui->assign('totalPayments', count($payments));
-    $ui->assign('successfulPayments', $successfulPayments);
-    $ui->assign('failedPayments', $failedPayments);
-    $ui->assign('pendingPayments', $pendingPayments);
-    $ui->assign('cancelledPayments', $cancelledPayments);
-    $ui->assign('payments', $payments);
-
-    $paymentGateway = pay_getAvailablePaymentGateways();
-    if (!$paymentGateway) {
-        $ui->assign('message', '<em>' . Lang::T("Payment Gateway is missing, you can purchase payment gateway plugin from ") . ' <a href="https://shop.focuslinkstech.com.ng"> shop.focuslinkstech.com.ng </a>' . ' ' . ' ' . Lang::T(" or Contact ") . ' ' . '<a href="https://t.me/focuslinkstech"> @focuslinkstech </a>' . ' ' . Lang::T(" for more informations") . '</em>');
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $pay_button = $_POST['pay_button'] ?: 'no';
+        $pay_custom_message = htmlspecialchars($_POST['pay_custom_message']) ?: '';
+        $_POST['pay_custom_message'] = $pay_custom_message;
+        $_POST['pay_button'] = $pay_button;
+        // Update or insert settings in the database
+        foreach ($_POST as $key => $value) {
+            $d = ORM::for_table('tbl_appconfig')->where('setting', $key)->find_one();
+            if ($d) {
+                $d->value = $value;
+                $d->save();
+            } else {
+                $d = ORM::for_table('tbl_appconfig')->create();
+                $d->setting = $key;
+                $d->value = $value;
+                $d->save();
+            }
+        }
+        r2(U . 'plugin/pay_setup', 's', Lang::T('Settings Saved Successfully'));
     }
-    $ui->display('pay_overview.tpl');
+
+    $ui->display('pay_setup.tpl');
 }
+
 
 function pay_generate_verification_code()
 {
@@ -115,10 +61,6 @@ function pay_check()
         displayMaintenanceMessage();
         die();
     }
-    $payment_gateways = pay_getAvailablePaymentGateways();
-    if (empty($payment_gateways)) {
-        pay_throwError(Lang::T("Payment gateway not found, Please Go back and try again, or Report this issue to ") . ' <a href="tel:' . $config['phone'] . '">' . $config['phone'] . '</a><br><br>' . Lang::T("Thanks."));
-    }
     session_start();
     $ui->assign('_title', Lang::T("Check Your Account Status"));
 
@@ -127,13 +69,7 @@ function pay_check()
     $verificationCodeExpiry = 5 * 60; // 5 minutes
 
     // Initialize or clean up old attempts
-    if (!isset($_SESSION['attempts'])) {
-        $_SESSION['attempts'] = [];
-    } else {
-        $_SESSION['attempts'] = array_filter($_SESSION['attempts'], function ($timestamp) use ($timeFrame) {
-            return $timestamp >= time() - $timeFrame;
-        });
-    }
+    $_SESSION['attempts'] = (!isset($_SESSION['attempts'])) ? [] : array_filter($_SESSION['attempts'], fn($timestamp) => $timestamp >= time() - $timeFrame);
 
     if (isset($_POST['check']) || isset($_POST['resend_code'])) {
         if (count($_SESSION['attempts']) >= $attemptLimit) {
@@ -163,7 +99,7 @@ function pay_check()
                 foreach ($sendMethods as $method) {
                     try {
                         Message::$method($phone, $message);
-                        _log('Verification Code Sent to: ' . $phone . ' ' . 'Via: ' . $method . ' ' . 'Message: ' . $message);
+                        _log("Verification Code Sent to: $phone Via: $method Message: $message");
                     } catch (Exception $e) {
                         // Log the error and display an error message to the user
                         _log('Failed to send verification code to: ' . $phone . ' ' . 'Via: ' . $method . ' ' . 'Message: ' . $message . ' ' . 'Error: ' . $e->getMessage());
@@ -213,7 +149,6 @@ function pay_check()
                         $ui->assign('amount', $amount);
                         $ui->assign('_bills', $bills);
                         $ui->assign('customerDetails', $customerDetails);
-                        $ui->assign('payment_gateways', $payment_gateways);
 
                         // Clear verification code after successful verification
                         unset($_SESSION['verification_code'], $_SESSION['verification_code_timestamp'], $_SESSION['customer_id']);
@@ -243,10 +178,20 @@ function pay_check()
 
 function pay_suspended()
 {
-    global $ui;
+    global $ui, $config;
     $ui->assign('_title', Lang::T("Internet Suspended"));
 
-    $ui->display('pay_suspended.tpl');
+    switch ($config['pay_template']) {
+        case 'default':
+            $ui->display('pay_suspended.tpl');
+            break;
+        default:
+            $payLink = APP_URL . '/?_route=plugin/pay_check';
+            header('Content-Type: text/html; charset=utf-8');
+            $customMessage = str_replace('[[pay_link]]', $payLink, $config['pay_custom_message']);
+            echo html_entity_decode($customMessage); 
+            break;
+    }
 }
 
 function pay_now()
@@ -259,65 +204,28 @@ function pay_now()
     }
     if (isset($_POST['pay'])) {
         $payment_data = pay_validateAndPreparePaymentData($_POST);
-        $gateway = $payment_data['payment_gateway'];
-        if (empty($gateway)) {
-            pay_throwError(Lang::T("Please select a payment gateway."));
-        }
-        $function_name = 'pay_processPayment_' . $gateway;
-        if (function_exists($function_name)) {
-            echo $function_name($payment_data);
-        } else {
-            pay_throwError(Lang::T("Payment processing function not found, Please Go back and try again, or Report this issue to ") . ' <a href="tel:' . $config['phone'] . '">' . $config['phone'] . '</a><br><br>' . Lang::T("Thanks."));
+        $customer = ORM::for_table('tbl_customers')->where('username', $payment_data['username'])->find_one();
+        $token = User::generateToken($customer['id'], 1);
+        if (!empty($token['token'])) {
+            $tur = ORM::for_table('tbl_user_recharges')
+                ->where('customer_id', $customer['id'])
+                ->where('namebp', $payment_data['plan_name'])
+                ->find_one();
+            if ($tur) {
+                $url = APP_URL . '?_route=home&recharge=' . $tur['id'] . '&uid=' . urlencode($token['token']);
+                header("Location: $url");
+            }
         }
     }
-}
-
-
-function pay_getAvailablePaymentGateways()
-{
-    $payment_gateway_files = glob('system/plugin/pay_pg-*.php');
-    $payment_gateways = [];
-
-    foreach ($payment_gateway_files as $file) {
-        $parts = explode('-', basename($file, '.php'));
-        $gateway_identifier = isset($parts[1]) ? $parts[1] : 'unknown';
-        $payment_gateways[] = [
-            'filename' => basename($file),
-            'value' => $gateway_identifier,
-            'name' => str_replace('_', ' ', ucfirst($gateway_identifier))
-        ];
-    }
-    return $payment_gateways;
 }
 
 function pay_validateAndPreparePaymentData($post_data)
 {
-    $phone = trim($post_data['phone']);
-    $phone = pay_formatPhoneNumber($phone);
-    if (strlen($phone) < 12) {
-        pay_throwError(Lang::T("Phone number is invalid, please check and try again."));
-        exit();
-    }
-    $plan = pay_getPlan($post_data['planid']);
-    $amount = $plan->price;
     $username = $post_data['username'];
-    if (isset($post_data['email']) == '') {
-        $email = pay_getEmailAddress($phone);
-    } else {
-        $email = trim($post_data['email']);
-    }
     $plan_name = $post_data['plan_name'];
     return [
         'username' => $username,
-        'routername' => $post_data['routername'],
-        'planid' => $post_data['planid'],
         'plan_name' => $plan_name,
-        'payment_gateway' => $post_data['payment_gateway'],
-        'phone' => $phone,
-        'email' => $email,
-        'amount' => $amount,
-        'txref' => uniqid('trx'),
-        'status' => 'pending'
     ];
 }
 
@@ -325,11 +233,7 @@ function pay_getEmailAddress($phone)
 {
     $serverHost = $_SERVER['HTTP_HOST'];
 
-    if ($serverHost === 'localhost') {
-        $email = $phone . '@' . $serverHost . '.com';
-    } else {
-        $email = $phone . '@' . $serverHost;
-    }
+    $email = ($serverHost === 'localhost') ? "$phone@$serverHost.com" : "$phone@$serverHost";
     return $email;
 }
 
@@ -366,460 +270,4 @@ function pay_formatPhoneNumber($phone)
     }
 
     return $phone;
-}
-
-function pay_savePayment(
-    $username,
-    $transaction_id,
-    $transaction_ref,
-    $amount,
-    $phone,
-    $planid,
-    $plan_name,
-    $routername,
-    $status,
-    $paymentGateway,
-    $failedMessage,
-    $location
-) {
-
-    if (
-        empty($transaction_id) || empty($transaction_ref) || empty($amount) || empty($phone) ||
-        empty($planid) || empty($plan_name) || empty($routername) ||
-        empty($status) || empty($paymentGateway)
-    ) {
-        pay_throwError(Lang::T("Invalid input provided"));
-        exit();
-    }
-
-    $trx = ORM::for_table('tbl_payments_page')->create();
-    $trx->username = $username;
-    $trx->transaction_id = $transaction_id;
-    $trx->transaction_ref = $transaction_ref;
-    $trx->amount = $amount;
-    $trx->phone_number = $phone;
-    $trx->plan_id = $planid;
-    $trx->plan_name = $plan_name;
-    $trx->router_name = $routername;
-    $trx->transaction_status = $status;
-    $trx->payment_gateway = $paymentGateway;
-
-    try {
-        $trx->save();
-        return $location;
-    } catch (Exception $e) {
-        _log(Lang::T("Failed to save transaction: ") . $e->getMessage());
-        pay_throwError($failedMessage);
-        exit;
-    }
-}
-
-
-function pay_throwError($message)
-{
-    // Construct the HTML content
-    $html = '<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Error: Bad Request</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f1f1f1;
-            text-align: center;
-            margin: 0;
-            padding: 0;
-        }
-        .container {
-            max-width: 600px;
-            margin: 100px auto;
-            padding: 20px;
-            background-color: #fff;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-        }
-        h1 {
-            color: #333;
-            margin-top: 0;
-            font-size: 24px;
-        }
-        p {
-            color: #777;
-            font-size: 16px;
-        }
-        .btn {
-            display: inline-block;
-            margin-top: 20px;
-            padding: 10px 20px;
-            font-size: 16px;
-            color: #fff;
-            background-color: #007bff;
-            border: none;
-            border-radius: 4px;
-            text-decoration: none;
-            cursor: pointer;
-        }
-        .btn:hover {
-            background-color: #0056b3;
-        }
-        /* Responsive Styles */
-        @media screen and (max-width: 600px) {
-            .container {
-                margin: 50px auto;
-                padding: 10px;
-            }
-            h1 {
-                font-size: 20px;
-            }
-            p {
-                font-size: 14px;
-            }
-            .btn {
-                font-size: 14px;
-                padding: 8px 16px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>An Error Occured</h1>
-        <p> ' . $message . '</p>
-        <a href="javascript:history.back()" class="btn">Go Back</a>
-    </div>
-</body>
-</html>';
-
-
-    // Set the appropriate headers
-    header('Content-Type: text/html');
-    header('HTTP/1.1 400 Bad Request');
-
-    // Output the HTML page
-    echo $html;
-    exit;
-}
-
-
-function pay_verify()
-{
-    global $ui, $config;
-    $ui->assign('_title', Lang::T("Payment Verification"));
-
-    $reference = isset($_GET['reference']) ? $_GET['reference'] : '';
-    $message = isset($_GET['message']) ? $_GET['message'] : '';
-
-    if ($message) {
-        pay_verify_display_error($message);
-    }
-
-    if (!$reference) {
-        pay_verify_display_error(Lang::T("No reference supplied."));
-    }
-
-    $check = ORM::for_table('tbl_payments_page')
-        ->where('transaction_ref', $reference)
-        ->find_one();
-
-    if ($check) {
-        $status = $check->transaction_status;
-
-        switch ($status) {
-            case 'paid':
-                pay_verify_display_success($check);
-                break;
-            case 'failed':
-                pay_verify_display_error(Lang::T("Transaction with this Reference ID: [$reference] has been processed and failed."));
-                break;
-            case 'cancelled':
-                pay_verify_display_error(Lang::T("Transaction with this Reference ID: [$reference] has been processed and cancelled."));
-                break;
-            default:
-                $ui->assign('companyName', $config['CompanyName']);
-                $ui->assign('msg', $message);
-                $ui->display('pay_verify.tpl');
-                break;
-        }
-    } else {
-        pay_verify_display_error(Lang::T("Transaction with this Reference ID: [$reference] not found."));
-    }
-}
-
-function pay_verify_display_error($message)
-{
-    $html = '<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Error: Bad Request</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background-color: #f1f1f1;
-                    text-align: center;
-                    margin: 0;
-                    padding: 0;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 100px auto;
-                    padding: 20px;
-                    background-color: #fff;
-                    border-radius: 8px;
-                    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-                }
-                h1 {
-                    color: #333;
-                    margin-top: 0;
-                    font-size: 24px;
-                }
-                p {
-                    color: #777;
-                    font-size: 16px;
-                }
-                /* Responsive Styles */
-                @media screen and (max-width: 600px) {
-                    .container {
-                        margin: 50px auto;
-                        padding: 10px;
-                    }
-                    h1 {
-                        font-size: 20px;
-                    }
-                    p {
-                        font-size: 14px;
-                    }
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>Error: Bad Request</h1>
-                <p>' . $message . '</p>
-            </div>
-        </body>
-        </html>';
-
-    // Set the appropriate headers
-    header('Content-Type: text/html');
-    header('HTTP/1.1 400 Bad Request');
-
-    // Output the HTML page
-    echo $html;
-    exit();
-}
-
-function pay_verify_display_success($transaction)
-{
-    global $config;
-    $orderSummary = [
-        Lang::T("Order Number") => $transaction->id,
-        Lang::T("Transaction ID") => $transaction->transaction_id,
-        Lang::T("Transaction Ref") => $transaction->transaction_ref,
-        Lang::T("Package") => $transaction->plan_name,
-        Lang::T("Expiry") => $transaction->expired_date,
-        Lang::T("Amount Paid") => $config['currency_code'] . number_format($transaction->amount, 2),
-        Lang::T("Payment Method") => $transaction->payment_gateway
-    ];
-
-    $html = '<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Successful</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background-color: #f1f1f1;
-                    text-align: center;
-                    margin: 0;
-                    padding: 0;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 100px auto;
-                    padding: 20px;
-                    background-color: #fff;
-                    border-radius: 8px;
-                    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-                }
-                h1 {
-                    color: #28a745;
-                    margin-top: 0;
-                    font-size: 24px;
-                    animation: fadeIn 1s ease-in-out;
-                }
-                p {
-                    color: #777;
-                    font-size: 16px;
-                    animation: fadeIn 1.5s ease-in-out;
-                }
-                .checkmark {
-                    width: 80px;
-                    height: 80px;
-                    margin: 0 auto 20px auto;
-                    border-radius: 50%;
-                    background-color: #28a745;
-                    animation: scaleUp 0.5s ease-in-out;
-                    position: relative;
-                }
-                .checkmark::after {
-                    content: "";
-                    display: block;
-                    width: 40px;
-                    height: 20px;
-                    border: 5px solid #fff;
-                    border-width: 0 0 5px 5px;
-                    transform: rotate(-45deg);
-                    position: absolute;
-                    top: 20px;
-                    left: 20px;
-                    animation: drawCheck 0.5s ease-in-out 0.5s forwards;
-                }
-                .btn {
-                    display: inline-block;
-                    margin-top: 20px;
-                    padding: 10px 20px;
-                    font-size: 16px;
-                    color: #fff;
-                    background-color: #007bff;
-                    border: none;
-                    border-radius: 4px;
-                    text-decoration: none;
-                    cursor: pointer;
-                    animation: fadeIn 2s ease-in-out;
-                }
-                .btn:hover {
-                    background-color: #0056b3;
-                }
-                .order-summary {
-                    text-align: left;
-                    margin: 20px auto;
-                    padding: 20px;
-                    background-color: #f9f9f9;
-                    border-radius: 8px;
-                    animation: fadeIn 2.5s ease-in-out;
-                }
-                .order-summary h2 {
-                    color: #333;
-                    font-size: 20px;
-                    margin-bottom: 10px;
-                }
-                .order-summary table {
-                    width: 100%;
-                    border-collapse: collapse;
-                }
-                .order-summary table, .order-summary th, .order-summary td {
-                    border: 1px solid #ddd;
-                }
-                .order-summary th, .order-summary td {
-                    padding: 8px;
-                    text-align: left;
-                }
-                .order-summary th {
-                    background-color: #f2f2f2;
-                }
-                .small-btn {
-                    padding: 5px 10px;
-                    font-size: 14px;
-                }
-                /* Animations */
-                @keyframes fadeIn {
-                    from { opacity: 0; }
-                    to { opacity: 1; }
-                }
-                @keyframes scaleUp {
-                    from { transform: scale(0); }
-                    to { transform: scale(1); }
-                }
-                @keyframes drawCheck {
-                    from { width: 0; height: 0; }
-                    to { width: 40px; height: 20px; }
-                }
-                /* Responsive Styles */
-                @media screen and (max-width: 600px) {
-                    .container {
-                        margin: 50px auto;
-                        padding: 10px;
-                    }
-                    h1 {
-                        font-size: 20px;
-                    }
-                    p {
-                        font-size: 14px;
-                    }
-                    .btn {
-                        font-size: 14px;
-                        padding: 8px 16px;
-                    }
-                    .order-summary {
-                        padding: 10px;
-                    }
-                    .order-summary h2 {
-                        font-size: 18px;
-                    }
-                    .order-summary th, .order-summary td {
-                        font-size: 14px;
-                        padding: 6px;
-                    }
-                    .small-btn {
-                        padding: 3px 8px;
-                        font-size: 12px;
-                    }
-                }
-            </style>
-            <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-            <script>
-                function copyVoucherCode() {
-                    var voucherCode = document.getElementById("voucherCode").innerText;
-                    navigator.clipboard.writeText(voucherCode).then(function() {
-                        Swal.fire({
-                            icon: "success",
-                            title: "Voucher code copied!",
-                            text: "The voucher code has been copied to the clipboard.",
-                            timer: 2000,
-                            showConfirmButton: false
-                        });
-                    }, function(err) {
-                        console.error("Could not copy text: ", err);
-                    });
-                }
-            </script>
-        </head>
-        <body>
-            <div class="container">
-                <div class="checkmark"></div>
-                <h1>Thank You!</h1>
-                <p>Your payment has been successfully processed.</p>
-                <div class="order-summary">
-                    <h2>Payment Summary</h2>
-                    <table>
-                        <tr>
-                            <th>Item</th>
-                            <th>Details</th>
-                        </tr>';
-
-    foreach ($orderSummary as $item => $details) {
-        $html .= '<tr>
-                            <td>' . $item . '</td>
-                            <td>' . $details . '</td>
-                        </tr>';
-    }
-
-    $html .= '</table>
-                </div>
-        </body>
-        </html>';
-
-    // Set the appropriate headers
-    header('Content-Type: text/html');
-    header('HTTP/1.1 200 OK');
-
-    // Output the HTML page
-    echo $html;
-    exit();
 }
